@@ -148,21 +148,28 @@ class TranscriptionService:
             estimated_duration = file_size / (10 * 1024)
             return estimated_duration
     
-    def _find_ogg_page_boundary(self, data: bytes, start_pos: int = 0) -> int:
+    def _find_ogg_page_boundary(self, data: bytes, start_pos: int = 0, find_last: bool = False) -> int:
         """
-        Находит границу следующей OGG страницы в данных.
+        Находит границу OGG страницы в данных.
         OGG страницы начинаются с магического числа 'OggS' (0x4F676753).
         
         Args:
             data: Данные файла
             start_pos: Позиция начала поиска
+            find_last: Если True, находит последнюю границу перед start_pos, иначе первую после
             
         Returns:
-            Позиция начала следующей OGG страницы или -1 если не найдено
+            Позиция начала OGG страницы или -1 если не найдено
         """
         magic = b'OggS'
-        pos = data.find(magic, start_pos)
-        return pos if pos >= 0 else -1
+        if find_last:
+            # Ищем последнюю границу перед start_pos
+            pos = data.rfind(magic, 0, start_pos)
+            return pos if pos >= 0 else -1
+        else:
+            # Ищем первую границу после start_pos
+            pos = data.find(magic, start_pos)
+            return pos if pos >= 0 else -1
     
     async def _split_audio_file_by_bytes(self, audio_path: str, start_byte: int, chunk_size: int, output_path: str) -> bool:
         """
@@ -189,21 +196,35 @@ class TranscriptionService:
             async with aiofiles.open(audio_path, "rb") as audio_file:
                 # Если это не первая часть, пытаемся найти начало OGG страницы
                 if start_byte > 0:
-                    # Читаем данные с небольшим запасом для поиска границы страницы
-                    search_start = max(0, start_byte - 5000)  # Ищем границу в пределах 5 КБ назад
+                    # Увеличиваем область поиска для более надежного поиска границы
+                    # OGG страницы могут быть до 64 КБ, поэтому ищем в пределах 64 КБ назад
+                    search_range = min(64 * 1024, start_byte)  # Максимум 64 КБ назад или до начала файла
+                    search_start = max(0, start_byte - search_range)
                     await audio_file.seek(search_start)
-                    search_data = await audio_file.read(min(end_byte - search_start + 1000, file_size - search_start))
+                    # Читаем больше данных для поиска границы
+                    read_size = min(end_byte - search_start + 1000, file_size - search_start)
+                    search_data = await audio_file.read(read_size)
                     
-                    # Ищем начало OGG страницы в области поиска
-                    page_start_in_search = self._find_ogg_page_boundary(search_data)
+                    # Ищем последнюю границу OGG страницы перед start_byte
+                    # Это гарантирует, что мы начнем с валидной страницы
+                    relative_start = start_byte - search_start
+                    page_start_in_search = self._find_ogg_page_boundary(search_data, 0, find_last=True)
+                    
+                    # Если не нашли границу в области до start_byte, ищем первую после
+                    if page_start_in_search < 0 or page_start_in_search > relative_start:
+                        page_start_in_search = self._find_ogg_page_boundary(search_data, relative_start)
+                    
                     if page_start_in_search >= 0:
                         # Найдена граница страницы, используем её
                         actual_start = search_start + page_start_in_search
+                        logger.debug(f"Найдена граница OGG страницы на позиции {actual_start} (было {start_byte})")
                         await audio_file.seek(actual_start)
                         actual_chunk_size = min(end_byte - actual_start, int(self.max_size * 0.9))
                         chunk_data = await audio_file.read(actual_chunk_size)
                     else:
-                        # Граница не найдена, используем исходную позицию
+                        # Граница не найдена, но все равно пытаемся использовать данные
+                        # Это может работать для некоторых случаев
+                        logger.warning(f"Не найдена граница OGG страницы для части на позиции {start_byte}, используем исходную позицию")
                         await audio_file.seek(start_byte)
                         chunk_data = await audio_file.read(end_byte - start_byte)
                 else:
@@ -285,6 +306,8 @@ class TranscriptionService:
             audio_duration = await self._get_audio_duration(audio_path)
             if audio_duration <= 0:
                 audio_duration = file_size / (10 * 1024)
+                logger.debug(f"Используем оценку длительности: {audio_duration:.1f} сек")
+            
             estimated_bytes_per_second = file_size / max(1, audio_duration)
             
             # Вычисляем позиции в байтах
@@ -295,9 +318,14 @@ class TranscriptionService:
             chunk_size = min(chunk_size, int(self.max_size * 0.9))
             start_byte = min(start_byte, file_size - 1)
             
-            return await self._split_audio_file_by_bytes(audio_path, start_byte, chunk_size, output_path)
+            logger.debug(f"Разделение по байтам: start_byte={start_byte}, chunk_size={chunk_size}, file_size={file_size}")
+            result = await self._split_audio_file_by_bytes(audio_path, start_byte, chunk_size, output_path)
+            if result and os.path.exists(output_path):
+                output_size = os.path.getsize(output_path)
+                logger.debug(f"Создана часть файла: {output_path}, размер: {output_size} байт")
+            return result
         except Exception as e:
-            logger.error(f"Ошибка при альтернативном разделении аудио: {e}")
+            logger.error(f"Ошибка при альтернативном разделении аудио: {e}", exc_info=True)
             return False
     
     async def _transcribe_chunk(self, audio_data: bytes, session: aiohttp.ClientSession, max_retries: int = 3) -> str:
@@ -479,10 +507,12 @@ class TranscriptionService:
                     for i in range(num_chunks):
                         start_time = i * chunk_duration
                         if start_time >= total_duration:
+                            logger.info(f"Достигнут конец файла на части {i+1}, завершаем обработку")
                             break
                         
                         # Длительность текущей части
                         current_duration = min(chunk_duration, total_duration - start_time)
+                        logger.info(f"Обрабатываем часть {i+1}/{num_chunks}: начало {start_time:.1f}с, длительность {current_duration:.1f}с")
                         
                         # Создаем временный файл для части
                         chunk_path = os.path.join(temp_dir, f"chunk_{i}.ogg")
@@ -490,11 +520,24 @@ class TranscriptionService:
                         # Разделяем файл (метод автоматически выберет ffmpeg или альтернативный)
                         success = await self._split_audio_file(audio_path, start_time, current_duration, chunk_path)
                         if not success:
-                            logger.warning(f"Не удалось создать часть {i+1}, пропускаем")
+                            logger.error(f"Не удалось создать часть {i+1} (время {start_time:.1f}-{start_time+current_duration:.1f}с), пропускаем")
+                            continue
+                        
+                        # Проверяем, что файл создан
+                        if not os.path.exists(chunk_path):
+                            logger.error(f"Файл части {i+1} не был создан, пропускаем")
                             continue
                         
                         # Проверяем размер части
                         chunk_size = os.path.getsize(chunk_path)
+                        if chunk_size == 0:
+                            logger.error(f"Часть {i+1} имеет нулевой размер, пропускаем")
+                            try:
+                                os.remove(chunk_path)
+                            except:
+                                pass
+                            continue
+                            
                         if chunk_size > self.max_size:
                             logger.warning(f"Часть {i+1} все еще слишком большая ({chunk_size / (1024*1024):.2f} МБ), пропускаем")
                             try:
@@ -518,29 +561,39 @@ class TranscriptionService:
                         
                         # Транскрибируем часть
                         try:
+                            logger.info(f"Транскрибируем часть {i+1}/{num_chunks} (размер: {chunk_size} байт)")
                             async with aiofiles.open(chunk_path, "rb") as chunk_file:
                                 chunk_data = await chunk_file.read()
                             
+                            if not chunk_data or len(chunk_data) == 0:
+                                logger.error(f"Часть {i+1} пустая, пропускаем")
+                                continue
+                            
                             chunk_text = await self._transcribe_chunk(chunk_data, session)
-                            if chunk_text:
+                            if chunk_text and chunk_text.strip():
                                 chunks_texts.append(chunk_text)
-                                logger.info(f"Часть {i+1}/{num_chunks} обработана: {len(chunk_text)} символов")
+                                logger.info(f"✅ Часть {i+1}/{num_chunks} успешно обработана: {len(chunk_text)} символов - \"{chunk_text[:50]}...\"")
+                            else:
+                                logger.warning(f"Часть {i+1}/{num_chunks} распознана, но текст пустой")
                         except Exception as e:
-                            logger.error(f"Ошибка при транскрибации части {i+1}: {e}")
+                            logger.error(f"Ошибка при транскрибации части {i+1}: {e}", exc_info=True)
                             # Продолжаем обработку остальных частей
                         finally:
                             # Удаляем временный файл части
                             try:
-                                os.remove(chunk_path)
-                            except:
-                                pass
+                                if os.path.exists(chunk_path):
+                                    os.remove(chunk_path)
+                            except Exception as cleanup_error:
+                                logger.debug(f"Ошибка при удалении временного файла {chunk_path}: {cleanup_error}")
                 
                 if not chunks_texts:
                     raise Exception("Не удалось распознать ни одну часть аудиофайла")
                 
                 # Объединяем результаты
                 full_text = " ".join(chunks_texts)
-                logger.info(f"Транскрибация завершена: {len(chunks_texts)} частей, всего {len(full_text)} символов")
+                logger.info(f"✅ Транскрибация завершена: обработано {len(chunks_texts)} из {num_chunks} частей, всего {len(full_text)} символов")
+                if len(chunks_texts) < num_chunks:
+                    logger.warning(f"⚠️ Внимание: обработано только {len(chunks_texts)} из {num_chunks} частей. Возможно, некоторые части были пропущены.")
                 return full_text.strip()
                 
             finally:
