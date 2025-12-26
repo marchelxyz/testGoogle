@@ -1,0 +1,13 @@
+aiogram==3.13.1
+python-dotenv==1.0.1
+caldav==1.4.2
+icalendar==5.0.12
+openai==1.51.0
+google-generativeai==0.8.3
+apscheduler==3.10.4
+aiofiles==24.1.0
+sqlalchemy==2.0.36
+aiosqlite==0.20.0
+pydantic==2.9.2
+python-dateutil==2.9.0.post0
+pytz==2024.2
