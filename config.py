@@ -10,8 +10,9 @@ class Config:
     # Telegram
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     
-    # OpenAI (для Whisper - транскрибация голоса)
-    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+    # Yandex SpeechKit (для транскрибации голоса)
+    YANDEX_SPEECHKIT_API_KEY = os.getenv("YANDEX_SPEECHKIT_API_KEY")
+    YANDEX_SPEECHKIT_FOLDER_ID = os.getenv("YANDEX_SPEECHKIT_FOLDER_ID")
     
     # Google Gemini (для обработки текста и извлечения данных о событиях)
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -36,7 +37,8 @@ class Config:
         """Проверка наличия обязательных переменных"""
         required = [
             "TELEGRAM_BOT_TOKEN",
-            "OPENAI_API_KEY",  # Для Whisper
+            "YANDEX_SPEECHKIT_API_KEY",  # Для Yandex SpeechKit
+            "YANDEX_SPEECHKIT_FOLDER_ID",  # Для Yandex SpeechKit
             "GEMINI_API_KEY",  # Для обработки текста
             # YANDEX_USER и YANDEX_PASS опциональны - можно настроить через бота командой /setup
         ]
