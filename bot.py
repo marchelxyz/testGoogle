@@ -218,8 +218,19 @@ async def handle_voice(message: Message):
         await bot.download_file(voice_file.file_path, file_path)
         logger.info(f"Голосовое сообщение скачано: {file_path}")
         
-        # Транскрибируем голос в текст
-        await message.answer("🔤 Распознаю речь...")
+        # Проверяем размер файла для информативного сообщения
+        file_size = os.path.getsize(file_path)
+        max_size = 1024 * 1024  # 1 МБ
+        
+        if file_size > max_size:
+            size_mb = file_size / (1024 * 1024)
+            await message.answer(
+                f"🔤 Распознаю речь...\n"
+                f"📊 Файл большой ({size_mb:.2f} МБ), разделяю на части для обработки."
+            )
+        else:
+            await message.answer("🔤 Распознаю речь...")
+        
         text = await transcription_service.transcribe_voice(file_path)
         
         if not text or len(text.strip()) == 0:
@@ -315,6 +326,14 @@ async def handle_voice(message: Message):
             
     except Exception as e:
         logger.error(f"Ошибка обработки голосового сообщения: {e}")
+        
+        # Удаляем временный файл в случае ошибки
+        try:
+            file_path = os.path.join(TEMP_DIR, f"{message.voice.file_id}.ogg")
+            await aiofiles_os.remove(file_path)
+        except:
+            pass
+        
         await message.answer(
             f"❌ Произошла ошибка: {str(e)}\n\n"
             "Попробуйте записать сообщение еще раз или используйте /help для справки."
