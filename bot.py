@@ -12,9 +12,14 @@ from config import Config
 from transcription import TranscriptionService
 from nlu_service import NLUService
 from calendar_service import YandexCalendarService
-from database import CalendarEvent, Notification, UserCredentials, init_db, async_session
-from sqlalchemy import select
-from datetime import datetime
+from database import (
+    init_db, 
+    get_user_credentials, 
+    save_user_credentials as db_save_user_credentials,
+    create_calendar_event,
+    get_calendar_event_by_id
+)
+from datetime import datetime, timedelta
 import re
 
 # Настройка логирования
@@ -38,60 +43,35 @@ async def get_user_calendar_service(telegram_user_id: int) -> YandexCalendarServ
     """Получение сервиса календаря для конкретного пользователя"""
     if telegram_user_id not in user_calendar_services:
         # Пытаемся получить учетные данные из БД
-        async with async_session() as session:
-            result = await session.execute(
-                select(UserCredentials).where(UserCredentials.telegram_user_id == telegram_user_id)
-            )
-            credentials = result.scalar_one_or_none()
+        credentials = await get_user_credentials(telegram_user_id)
             
-            if credentials:
-                # Создаем сервис с учетными данными пользователя
-                user_calendar_services[telegram_user_id] = YandexCalendarService(
-                    yandex_user=credentials.yandex_user,
-                    yandex_password=credentials.yandex_password
-                )
+        if credentials:
+            # Создаем сервис с учетными данными пользователя
+            user_calendar_services[telegram_user_id] = YandexCalendarService(
+                yandex_user=credentials['yandex_user'],
+                yandex_password=credentials['yandex_password']
+            )
+        else:
+            # Используем глобальные учетные данные из Config (для обратной совместимости)
+            if Config.YANDEX_USER and Config.YANDEX_PASS:
+                user_calendar_services[telegram_user_id] = YandexCalendarService()
             else:
-                # Используем глобальные учетные данные из Config (для обратной совместимости)
-                if Config.YANDEX_USER and Config.YANDEX_PASS:
-                    user_calendar_services[telegram_user_id] = YandexCalendarService()
-                else:
-                    raise ValueError("Учетные данные не настроены. Используйте команду /setup для настройки.")
+                raise ValueError("Учетные данные не настроены. Используйте команду /setup для настройки.")
     
     return user_calendar_services[telegram_user_id]
 
 async def save_user_credentials(telegram_user_id: int, yandex_user: str, yandex_password: str):
     """Сохранение учетных данных пользователя"""
-    async with async_session() as session:
-        # Проверяем, есть ли уже учетные данные
-        result = await session.execute(
-            select(UserCredentials).where(UserCredentials.telegram_user_id == telegram_user_id)
+    await db_save_user_credentials(telegram_user_id, yandex_user, yandex_password)
+    
+    # Обновляем сервис календаря для пользователя
+    if telegram_user_id in user_calendar_services:
+        user_calendar_services[telegram_user_id].reconnect(yandex_user, yandex_password)
+    else:
+        user_calendar_services[telegram_user_id] = YandexCalendarService(
+            yandex_user=yandex_user,
+            yandex_password=yandex_password
         )
-        credentials = result.scalar_one_or_none()
-        
-        if credentials:
-            # Обновляем существующие
-            credentials.yandex_user = yandex_user
-            credentials.yandex_password = yandex_password
-            credentials.updated_at = datetime.utcnow()
-        else:
-            # Создаем новые
-            credentials = UserCredentials(
-                telegram_user_id=telegram_user_id,
-                yandex_user=yandex_user,
-                yandex_password=yandex_password
-            )
-            session.add(credentials)
-        
-        await session.commit()
-        
-        # Обновляем сервис календаря для пользователя
-        if telegram_user_id in user_calendar_services:
-            user_calendar_services[telegram_user_id].reconnect(yandex_user, yandex_password)
-        else:
-            user_calendar_services[telegram_user_id] = YandexCalendarService(
-                yandex_user=yandex_user,
-                yandex_password=yandex_password
-            )
 
 # Создаем папку для временных файлов
 TEMP_DIR = "temp"
@@ -102,11 +82,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 async def cmd_start(message: Message):
     """Обработчик команды /start"""
     # Проверяем, настроены ли учетные данные пользователя
-    async with async_session() as session:
-        result = await session.execute(
-            select(UserCredentials).where(UserCredentials.telegram_user_id == message.from_user.id)
-        )
-        credentials = result.scalar_one_or_none()
+    credentials = await get_user_credentials(message.from_user.id)
     
     welcome_text = (
         "👋 Привет! Я бот для управления календарем.\n\n"
@@ -119,7 +95,7 @@ async def cmd_start(message: Message):
         )
     else:
         welcome_text += (
-            f"✅ Учетные данные настроены: {credentials.yandex_user}\n\n"
+            f"✅ Учетные данные настроены: {credentials['yandex_user']}\n\n"
         )
     
     welcome_text += (
@@ -277,22 +253,18 @@ async def handle_voice(message: Message):
             )
             
             # Сохраняем событие в базу данных
-            async with async_session() as session:
-                db_event = CalendarEvent(
-                    event_id=event_data["event_id"],
-                    summary=event_data["summary"],
-                    description=event_info.get("description"),
-                    start_datetime=event_data["start"],
-                    end_datetime=event_data["end"],
-                    telegram_user_id=message.from_user.id
-                )
-                session.add(db_event)
-                await session.commit()
-                await session.refresh(db_event)
-                
-                # Создаем уведомления
-                from scheduler import create_notifications
-                await create_notifications(db_event.id, event_data["start"])
+            db_event_id = await create_calendar_event(
+                event_id=event_data["event_id"],
+                summary=event_data["summary"],
+                start_datetime=event_data["start"],
+                end_datetime=event_data["end"],
+                telegram_user_id=message.from_user.id,
+                description=event_info.get("description")
+            )
+            
+            # Создаем уведомления
+            from scheduler import create_notifications
+            await create_notifications(db_event_id, event_data["start"])
             
             start_str = event_data["start"].strftime("%d.%m.%Y в %H:%M")
             await message.answer(
@@ -430,30 +402,26 @@ async def handle_text(message: Message):
                     return
                 else:
                     # Проверяем, есть ли уже сохраненные учетные данные
-                    async with async_session() as session:
-                        result = await session.execute(
-                            select(UserCredentials).where(UserCredentials.telegram_user_id == user_id)
-                        )
-                        credentials = result.scalar_one_or_none()
+                    credentials = await get_user_credentials(user_id)
                         
-                        if credentials:
-                            # Обновляем только пароль
-                            await save_user_credentials(user_id, credentials.yandex_user, password)
-                            await message.answer(
-                                f"✅ Пароль успешно обновлен!\n\n"
-                                f"📧 Email: {credentials.yandex_user}\n"
-                                f"🔑 Пароль: {'*' * len(password)}\n\n"
-                                "Теперь ты можешь использовать бота для создания событий в календаре!"
-                            )
-                            return
-                        else:
-                            await message.answer(
-                                "❌ Не найден email. Отправь мне учетные данные в формате:\n\n"
-                                "📧 Email: твой_email@yandex.ru\n"
-                                "🔑 Пароль: твой_пароль_приложения\n\n"
-                                "Или используй команду /setup для инструкций."
-                            )
-                            return
+                    if credentials:
+                        # Обновляем только пароль
+                        await save_user_credentials(user_id, credentials['yandex_user'], password)
+                        await message.answer(
+                            f"✅ Пароль успешно обновлен!\n\n"
+                            f"📧 Email: {credentials['yandex_user']}\n"
+                            f"🔑 Пароль: {'*' * len(password)}\n\n"
+                            "Теперь ты можешь использовать бота для создания событий в календаре!"
+                        )
+                        return
+                    else:
+                        await message.answer(
+                            "❌ Не найден email. Отправь мне учетные данные в формате:\n\n"
+                            "📧 Email: твой_email@yandex.ru\n"
+                            "🔑 Пароль: твой_пароль_приложения\n\n"
+                            "Или используй команду /setup для инструкций."
+                        )
+                        return
         
         except Exception as e:
             logger.error(f"Ошибка сохранения учетных данных: {e}")

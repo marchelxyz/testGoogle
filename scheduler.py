@@ -2,8 +2,7 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from datetime import datetime, timedelta
-from sqlalchemy import select, and_
-from database import async_session, CalendarEvent, Notification
+from database import create_notification as db_create_notification, get_pending_notifications, mark_notification_sent
 from config import Config
 import logging
 import pytz
@@ -22,81 +21,65 @@ async def create_notifications(event_id: int, start_datetime: datetime):
         event_id: ID события в базе данных
         start_datetime: Дата и время начала события
     """
-    async with async_session() as session:
-        for minutes_before in Config.NOTIFICATION_TIMES:
-            notification_time = start_datetime - timedelta(minutes=minutes_before)
-            
-            # Создаем уведомление только если время еще не прошло
-            if notification_time > datetime.now(notification_time.tzinfo):
-                notification = Notification(
-                    event_id=event_id,
-                    notification_time=notification_time
-                )
-                session.add(notification)
+    for minutes_before in Config.NOTIFICATION_TIMES:
+        notification_time = start_datetime - timedelta(minutes=minutes_before)
         
-        await session.commit()
-        logger.info(f"Созданы уведомления для события {event_id}")
+        # Создаем уведомление только если время еще не прошло
+        if notification_time > datetime.now(notification_time.tzinfo):
+            await db_create_notification(event_id, notification_time)
+    
+    logger.info(f"Созданы уведомления для события {event_id}")
 
 
 async def check_and_send_notifications(bot: Bot):
     """Проверка и отправка уведомлений"""
     try:
         timezone = pytz.timezone(Config.TIMEZONE)
-        async with async_session() as session:
-            # Находим уведомления, которые нужно отправить (в течение следующих 2 минут)
-            now = datetime.now(timezone)
-            check_time = now + timedelta(minutes=2)
+        # Находим уведомления, которые нужно отправить (в течение следующих 2 минут)
+        now = datetime.now(timezone)
+        check_time = now + timedelta(minutes=2)
+        
+        notifications = await get_pending_notifications(check_time, now)
+        
+        for notification in notifications:
+            # Данные события уже включены в результат запроса
+            event_summary = notification['summary']
+            telegram_user_id = notification['telegram_user_id']
+            event_start = notification['start_datetime']
             
-            stmt = select(Notification).join(CalendarEvent).where(
-                and_(
-                    Notification.sent == False,
-                    Notification.notification_time <= check_time,
-                    Notification.notification_time >= now - timedelta(minutes=1)
-                )
+            # Отправляем уведомление
+            if isinstance(event_start, datetime):
+                event_time = event_start
+            else:
+                # Если это строка, парсим её
+                from dateutil import parser
+                event_time = parser.parse(str(event_start))
+            
+            if event_time.tzinfo is None:
+                event_time = timezone.localize(event_time)
+            time_until = event_time - now
+            minutes_until = max(0, int(time_until.total_seconds() / 60))
+            
+            message_text = (
+                f"🔔 Напоминание!\n\n"
+                f"📌 {event_summary}\n"
+                f"📅 {event_time.strftime('%d.%m.%Y в %H:%M')}\n"
+                f"⏰ Через {minutes_until} минут"
             )
             
-            result = await session.execute(stmt)
-            notifications = result.scalars().all()
-            
-            for notification in notifications:
-                # Получаем событие
-                stmt_event = select(CalendarEvent).where(
-                    CalendarEvent.id == notification.event_id
-                )
-                result_event = await session.execute(stmt_event)
-                event = result_event.scalar_one_or_none()
-                
-                if not event:
-                    continue
-                
-                # Отправляем уведомление
-                event_time = event.start_datetime
-                if event_time.tzinfo is None:
-                    event_time = timezone.localize(event_time)
-                time_until = event_time - now
-                minutes_until = max(0, int(time_until.total_seconds() / 60))
-                
-                message_text = (
-                    f"🔔 Напоминание!\n\n"
-                    f"📌 {event.summary}\n"
-                    f"📅 {event.start_datetime.strftime('%d.%m.%Y в %H:%M')}\n"
-                    f"⏰ Через {minutes_until} минут"
+            try:
+                await bot.send_message(
+                    chat_id=telegram_user_id,
+                    text=message_text
                 )
                 
-                try:
-                    await bot.send_message(
-                        chat_id=event.telegram_user_id,
-                        text=message_text
-                    )
-                    
-                    # Помечаем уведомление как отправленное
-                    notification.sent = True
-                    await session.commit()
-                    
-                    logger.info(f"Отправлено уведомление для события {event.summary}")
-                    
-                except Exception as e:
-                    logger.error(f"Ошибка отправки уведомления: {e}")
+                # Помечаем уведомление как отправленное
+                await mark_notification_sent(notification['id'])
+                
+                logger.info(f"Отправлено уведомление для события {event_summary}")
+                
+            except Exception as e:
+                logger.error(f"Ошибка отправки уведомления: {e}")
                     
     except Exception as e:
         logger.error(f"Ошибка проверки уведомлений: {e}")
