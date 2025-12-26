@@ -16,7 +16,8 @@ class Config:
     # Google Gemini (для обработки текста и извлечения данных о событиях)
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     
-    # Яндекс Календарь
+    # Яндекс Календарь (опционально - можно настроить через бота командой /setup)
+    # Эти переменные используются только для обратной совместимости, если пользователь не настроил свои учетные данные
     YANDEX_USER = os.getenv("YANDEX_USER")
     YANDEX_PASS = os.getenv("YANDEX_PASS")
     CALDAV_URL = f"https://caldav.yandex.ru/calendars/{os.getenv('YANDEX_USER', '')}/"
@@ -37,8 +38,7 @@ class Config:
             "TELEGRAM_BOT_TOKEN",
             "OPENAI_API_KEY",  # Для Whisper
             "GEMINI_API_KEY",  # Для обработки текста
-            "YANDEX_USER",
-            "YANDEX_PASS"
+            # YANDEX_USER и YANDEX_PASS опциональны - можно настроить через бота командой /setup
         ]
         missing = [var for var in required if not getattr(cls, var)]
         if missing:
