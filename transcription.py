@@ -92,10 +92,21 @@ class TranscriptionService:
             if process.returncode != 0:
                 error_msg = stderr.decode('utf-8', errors='ignore')
                 logger.warning(f"Не удалось получить длительность через ffprobe: {error_msg}")
-                # Возвращаем примерную оценку на основе размера файла
+                # Пытаемся использовать mutagen для OGG файлов
+                if MUTAGEN_AVAILABLE:
+                    try:
+                        audio_file = OggOpus(audio_path)
+                        if audio_file.length is not None:
+                            duration = float(audio_file.length)
+                            if duration > 0:
+                                return duration
+                    except Exception as e:
+                        logger.debug(f"Не удалось получить длительность через mutagen: {e}")
+                
+                # Возвращаем консервативную оценку на основе размера файла
                 file_size = os.path.getsize(audio_path)
-                # Примерно 10-15 КБ/секунда для OGG Opus
-                estimated_duration = file_size / (12 * 1024)
+                # Используем 10 КБ/секунда для консервативной оценки OGG Opus
+                estimated_duration = file_size / (10 * 1024)
                 return estimated_duration
             
             result = json.loads(stdout.decode('utf-8'))
@@ -103,13 +114,38 @@ class TranscriptionService:
             return duration
         except FileNotFoundError:
             logger.warning("ffprobe не найден, используем оценку по размеру файла")
+            # Пытаемся использовать mutagen для OGG файлов
+            if MUTAGEN_AVAILABLE:
+                try:
+                    audio_file = OggOpus(audio_path)
+                    if audio_file.length is not None:
+                        duration = float(audio_file.length)
+                        if duration > 0:
+                            return duration
+                except Exception as e:
+                    logger.debug(f"Не удалось получить длительность через mutagen: {e}")
+            
             file_size = os.path.getsize(audio_path)
-            estimated_duration = file_size / (12 * 1024)  # Примерно 12 КБ/секунда
+            # Используем более консервативную оценку: 10 КБ/секунда для OGG Opus
+            # Это гарантирует, что части не будут превышать лимиты
+            estimated_duration = file_size / (10 * 1024)
             return estimated_duration
         except Exception as e:
             logger.warning(f"Ошибка при получении длительности: {e}")
+            # Пытаемся использовать mutagen для OGG файлов
+            if MUTAGEN_AVAILABLE:
+                try:
+                    audio_file = OggOpus(audio_path)
+                    if audio_file.length is not None:
+                        duration = float(audio_file.length)
+                        if duration > 0:
+                            return duration
+                except Exception:
+                    pass
+            
             file_size = os.path.getsize(audio_path)
-            estimated_duration = file_size / (12 * 1024)
+            # Используем более консервативную оценку: 10 КБ/секунда
+            estimated_duration = file_size / (10 * 1024)
             return estimated_duration
     
     def _find_ogg_page_boundary(self, data: bytes, start_pos: int = 0) -> int:
@@ -245,8 +281,11 @@ class TranscriptionService:
             file_size = os.path.getsize(audio_path)
             
             # Оцениваем размер одной секунды аудио
-            # Используем примерную оценку: 12 КБ/секунда для OGG Opus
-            estimated_bytes_per_second = file_size / max(1, await self._get_audio_duration(audio_path))
+            # Используем консервативную оценку: 10 КБ/секунда для OGG Opus
+            audio_duration = await self._get_audio_duration(audio_path)
+            if audio_duration <= 0:
+                audio_duration = file_size / (10 * 1024)
+            estimated_bytes_per_second = file_size / max(1, audio_duration)
             
             # Вычисляем позиции в байтах
             start_byte = int(start_time * estimated_bytes_per_second)
@@ -261,13 +300,14 @@ class TranscriptionService:
             logger.error(f"Ошибка при альтернативном разделении аудио: {e}")
             return False
     
-    async def _transcribe_chunk(self, audio_data: bytes, session: aiohttp.ClientSession) -> str:
+    async def _transcribe_chunk(self, audio_data: bytes, session: aiohttp.ClientSession, max_retries: int = 3) -> str:
         """
-        Транскрибирует один фрагмент аудио
+        Транскрибирует один фрагмент аудио с повторными попытками при ошибках сервера
         
         Args:
             audio_data: Данные аудиофайла
             session: Сессия aiohttp
+            max_retries: Максимальное количество повторных попыток
             
         Returns:
             Транскрибированный текст
@@ -283,35 +323,80 @@ class TranscriptionService:
             "Authorization": f"Api-Key {self.api_key}"
         }
         
-        async with session.post(
-            self.api_url,
-            params=params,
-            headers=headers,
-            data=audio_data
-        ) as response:
-            if response.status != 200:
-                error_data = await response.read()
-                error_text = error_data.decode('utf-8', errors='ignore')
-                logger.error(f"Ошибка API Yandex SpeechKit: {response.status} - {error_text}")
-                
-                error_msg = None
-                try:
-                    error_json = json.loads(error_text)
-                    error_msg = error_json.get("error", {}).get("error_message", error_text)
-                except:
-                    error_msg = error_text
-                
-                raise Exception(f"Ошибка распознавания речи: {error_msg or response.status}")
-            
-            result = await response.json()
-            
-            if "result" not in result:
-                error_msg = result.get("error", {}).get("message", "Неизвестная ошибка")
-                logger.error(f"Ошибка в ответе Yandex SpeechKit: {error_msg}")
-                raise Exception(f"Ошибка распознавания речи: {error_msg}")
-            
-            text = result["result"]
-            return text.strip() if text else ""
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                async with session.post(
+                    self.api_url,
+                    params=params,
+                    headers=headers,
+                    data=audio_data
+                ) as response:
+                    if response.status != 200:
+                        error_data = await response.read()
+                        error_text = error_data.decode('utf-8', errors='ignore')
+                        
+                        error_msg = None
+                        error_code = None
+                        try:
+                            error_json = json.loads(error_text)
+                            error_code = error_json.get("error_code")
+                            error_msg = error_json.get("error_message", error_text)
+                        except:
+                            error_msg = error_text
+                        
+                        # Для INTERNAL_SERVER_ERROR делаем повторную попытку
+                        if response.status == 500 or (error_code == "INTERNAL_SERVER_ERROR" and attempt < max_retries - 1):
+                            wait_time = (attempt + 1) * 2  # Экспоненциальная задержка: 2, 4, 6 секунд
+                            logger.warning(
+                                f"Ошибка сервера (попытка {attempt + 1}/{max_retries}): "
+                                f"{response.status} - {error_msg}. Повтор через {wait_time} сек..."
+                            )
+                            await asyncio.sleep(wait_time)
+                            last_error = Exception(f"Ошибка распознавания речи: {error_msg or response.status}")
+                            continue
+                        
+                        # Для других ошибок не делаем повторные попытки
+                        logger.error(f"Ошибка API Yandex SpeechKit: {response.status} - {error_text}")
+                        raise Exception(f"Ошибка распознавания речи: {error_msg or response.status}")
+                    
+                    result = await response.json()
+                    
+                    if "result" not in result:
+                        error_msg = result.get("error", {}).get("message", "Неизвестная ошибка")
+                        error_code = result.get("error", {}).get("error_code")
+                        
+                        # Для INTERNAL_SERVER_ERROR делаем повторную попытку
+                        if error_code == "INTERNAL_SERVER_ERROR" and attempt < max_retries - 1:
+                            wait_time = (attempt + 1) * 2
+                            logger.warning(
+                                f"Ошибка сервера в ответе (попытка {attempt + 1}/{max_retries}): "
+                                f"{error_msg}. Повтор через {wait_time} сек..."
+                            )
+                            await asyncio.sleep(wait_time)
+                            last_error = Exception(f"Ошибка распознавания речи: {error_msg}")
+                            continue
+                        
+                        logger.error(f"Ошибка в ответе Yandex SpeechKit: {error_msg}")
+                        raise Exception(f"Ошибка распознавания речи: {error_msg}")
+                    
+                    text = result["result"]
+                    return text.strip() if text else ""
+                    
+            except Exception as e:
+                # Если это не ошибка сервера или последняя попытка, пробрасываем исключение
+                if attempt == max_retries - 1 or "INTERNAL_SERVER_ERROR" not in str(e):
+                    raise
+                last_error = e
+                wait_time = (attempt + 1) * 2
+                logger.warning(f"Исключение при транскрибации (попытка {attempt + 1}/{max_retries}): {e}. Повтор через {wait_time} сек...")
+                await asyncio.sleep(wait_time)
+        
+        # Если все попытки исчерпаны, пробрасываем последнюю ошибку
+        if last_error:
+            raise last_error
+        raise Exception("Не удалось транскрибировать фрагмент после всех попыток")
     
     async def transcribe_voice(self, audio_path: str) -> str:
         """
@@ -330,8 +415,15 @@ class TranscriptionService:
         try:
             file_size = os.path.getsize(audio_path)
             
-            # Если файл меньше 1 МБ, обрабатываем как обычно
-            if file_size <= self.max_size:
+            # Получаем длительность файла для проверки ограничения в 30 секунд
+            total_duration = await self._get_audio_duration(audio_path)
+            if total_duration <= 0:
+                # Если не удалось определить длительность, используем консервативную оценку по размеру
+                # Используем 10 КБ/секунда для гарантии, что части не превысят лимиты
+                total_duration = file_size / (10 * 1024)
+            
+            # Если файл меньше 1 МБ и короче 30 секунд, обрабатываем как обычно
+            if file_size <= self.max_size and total_duration <= 30.0:
                 async with aiofiles.open(audio_path, "rb") as audio_file:
                     audio_data = await audio_file.read()
                 
@@ -342,22 +434,31 @@ class TranscriptionService:
                     logger.info(f"Транскрибация завершена: {text[:50]}...")
                     return text
             
-            # Файл больше 1 МБ - разделяем на части
+            # Файл нужно разделить: либо слишком большой, либо слишком длинный
             size_mb = file_size / (1024 * 1024)
-            logger.info(f"Файл слишком большой ({size_mb:.2f} МБ), разделяем на части...")
+            if file_size > self.max_size:
+                logger.info(f"Файл слишком большой ({size_mb:.2f} МБ), разделяем на части...")
+            elif total_duration > 30.0:
+                logger.info(f"Файл слишком длинный ({total_duration:.1f} сек, максимум 30 сек), разделяем на части...")
             
-            # Получаем длительность файла (или оценку)
-            total_duration = await self._get_audio_duration(audio_path)
+            # Используем уже полученную длительность (определена выше)
             if total_duration <= 0:
-                # Если не удалось определить длительность, используем оценку по размеру
-                total_duration = file_size / (12 * 1024)  # Примерно 12 КБ/секунда
+                # Если все еще не удалось определить, используем консервативную оценку по размеру
+                total_duration = file_size / (10 * 1024)  # 10 КБ/секунда для консервативной оценки
                 logger.info(f"Используем оценку длительности: {total_duration:.1f} секунд")
             
             # Оцениваем размер одной секунды аудио
             bytes_per_second = file_size / total_duration
             
             # Вычисляем длительность части, которая будет меньше 1 МБ (с запасом 10%)
-            chunk_duration = (self.max_size * 0.9) / bytes_per_second
+            chunk_duration_by_size = (self.max_size * 0.9) / bytes_per_second
+            
+            # Yandex SpeechKit ограничивает длительность аудио до 30 секунд
+            # Используем максимум 25 секунд с запасом
+            MAX_CHUNK_DURATION = 25.0
+            
+            # Выбираем минимальное значение из ограничений по размеру и длительности
+            chunk_duration = min(chunk_duration_by_size, MAX_CHUNK_DURATION)
             
             # Проверяем наличие ffmpeg для информационных сообщений
             ffmpeg_available = await self._check_ffmpeg_available()
@@ -396,6 +497,19 @@ class TranscriptionService:
                         chunk_size = os.path.getsize(chunk_path)
                         if chunk_size > self.max_size:
                             logger.warning(f"Часть {i+1} все еще слишком большая ({chunk_size / (1024*1024):.2f} МБ), пропускаем")
+                            try:
+                                os.remove(chunk_path)
+                            except:
+                                pass
+                            continue
+                        
+                        # Проверяем длительность части (если возможно)
+                        chunk_duration_actual = await self._get_audio_duration(chunk_path)
+                        if chunk_duration_actual > 30.0:
+                            logger.warning(
+                                f"Часть {i+1} слишком длинная ({chunk_duration_actual:.1f} сек, "
+                                f"максимум 30 сек), пропускаем"
+                            )
                             try:
                                 os.remove(chunk_path)
                             except:
