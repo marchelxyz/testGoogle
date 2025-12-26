@@ -21,11 +21,19 @@ async def create_notifications(event_id: int, start_datetime: datetime):
         event_id: ID события в базе данных
         start_datetime: Дата и время начала события
     """
+    timezone = pytz.timezone(Config.TIMEZONE)
+    
+    # Убеждаемся, что start_datetime имеет timezone
+    if start_datetime.tzinfo is None:
+        start_datetime = timezone.localize(start_datetime)
+    
+    now = datetime.now(timezone)
+    
     for minutes_before in Config.NOTIFICATION_TIMES:
         notification_time = start_datetime - timedelta(minutes=minutes_before)
         
         # Создаем уведомление только если время еще не прошло
-        if notification_time > datetime.now(notification_time.tzinfo):
+        if notification_time > now:
             await db_create_notification(event_id, notification_time)
     
     logger.info(f"Созданы уведомления для события {event_id}")
@@ -39,7 +47,11 @@ async def check_and_send_notifications(bot: Bot):
         now = datetime.now(timezone)
         check_time = now + timedelta(minutes=2)
         
-        notifications = await get_pending_notifications(check_time, now)
+        # Конвертируем в UTC для передачи в БД
+        now_utc = now.astimezone(pytz.UTC)
+        check_time_utc = check_time.astimezone(pytz.UTC)
+        
+        notifications = await get_pending_notifications(check_time_utc, now_utc)
         
         for notification in notifications:
             # Данные события уже включены в результат запроса
@@ -55,15 +67,19 @@ async def check_and_send_notifications(bot: Bot):
                 from dateutil import parser
                 event_time = parser.parse(str(event_start))
             
+            # Если datetime из БД naive (без timezone), считаем что это UTC
             if event_time.tzinfo is None:
-                event_time = timezone.localize(event_time)
-            time_until = event_time - now
+                event_time = pytz.UTC.localize(event_time)
+            
+            # Конвертируем в локальный timezone для отображения
+            event_time_local = event_time.astimezone(timezone)
+            time_until = event_time_local - now
             minutes_until = max(0, int(time_until.total_seconds() / 60))
             
             message_text = (
                 f"🔔 Напоминание!\n\n"
                 f"📌 {event_summary}\n"
-                f"📅 {event_time.strftime('%d.%m.%Y в %H:%M')}\n"
+                f"📅 {event_time_local.strftime('%d.%m.%Y в %H:%M')}\n"
                 f"⏰ Через {minutes_until} минут"
             )
             
