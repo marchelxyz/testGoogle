@@ -215,6 +215,22 @@ class NLUService:
             # Парсим JSON
             result = json.loads(result_text)
             
+            # Проверяем, что result является словарем, а не списком
+            if isinstance(result, list):
+                if len(result) > 0:
+                    # Если это список, берем первый элемент
+                    result = result[0]
+                    logger.warning("Gemini вернул список вместо объекта, используется первый элемент")
+                else:
+                    # Если список пустой, создаем словарь по умолчанию
+                    result = {}
+                    logger.warning("Gemini вернул пустой список, используется словарь по умолчанию")
+            
+            # Убеждаемся, что result является словарем
+            if not isinstance(result, dict):
+                logger.error(f"Неожиданный тип результата: {type(result)}, значение: {result}")
+                raise ValueError("Не удалось обработать ответ от модели. Попробуйте сформулировать иначе.")
+            
             # Парсим дату и время
             if "start_datetime" in result:
                 dt_str = result["start_datetime"]
