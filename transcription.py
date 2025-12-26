@@ -10,6 +10,14 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Попытка импортировать mutagen для работы с OGG файлами
+try:
+    from mutagen.oggopus import OggOpus
+    MUTAGEN_AVAILABLE = True
+except ImportError:
+    MUTAGEN_AVAILABLE = False
+    logger.warning("mutagen не установлен, будет использован упрощенный метод разделения файлов")
+
 class TranscriptionService:
     """Сервис для преобразования голоса в текст через Yandex SpeechKit"""
     
@@ -104,17 +112,94 @@ class TranscriptionService:
             estimated_duration = file_size / (12 * 1024)
             return estimated_duration
     
+    def _find_ogg_page_boundary(self, data: bytes, start_pos: int = 0) -> int:
+        """
+        Находит границу следующей OGG страницы в данных.
+        OGG страницы начинаются с магического числа 'OggS' (0x4F676753).
+        
+        Args:
+            data: Данные файла
+            start_pos: Позиция начала поиска
+            
+        Returns:
+            Позиция начала следующей OGG страницы или -1 если не найдено
+        """
+        magic = b'OggS'
+        pos = data.find(magic, start_pos)
+        return pos if pos >= 0 else -1
+    
+    async def _split_audio_file_by_bytes(self, audio_path: str, start_byte: int, chunk_size: int, output_path: str) -> bool:
+        """
+        Разделяет аудиофайл на части по байтам без использования ffmpeg.
+        Пытается найти границы OGG страниц для более корректного разделения.
+        
+        Args:
+            audio_path: Путь к исходному файлу
+            start_byte: Начальная позиция в байтах
+            chunk_size: Размер части в байтах
+            output_path: Путь для сохранения части
+            
+        Returns:
+            True если успешно, False иначе
+        """
+        try:
+            file_size = os.path.getsize(audio_path)
+            
+            # Ограничиваем размер части
+            chunk_size = min(chunk_size, int(self.max_size * 0.9))
+            start_byte = max(0, min(start_byte, file_size - 1))
+            end_byte = min(start_byte + chunk_size, file_size)
+            
+            async with aiofiles.open(audio_path, "rb") as audio_file:
+                # Если это не первая часть, пытаемся найти начало OGG страницы
+                if start_byte > 0:
+                    # Читаем данные с небольшим запасом для поиска границы страницы
+                    search_start = max(0, start_byte - 5000)  # Ищем границу в пределах 5 КБ назад
+                    await audio_file.seek(search_start)
+                    search_data = await audio_file.read(min(end_byte - search_start + 1000, file_size - search_start))
+                    
+                    # Ищем начало OGG страницы в области поиска
+                    page_start_in_search = self._find_ogg_page_boundary(search_data)
+                    if page_start_in_search >= 0:
+                        # Найдена граница страницы, используем её
+                        actual_start = search_start + page_start_in_search
+                        await audio_file.seek(actual_start)
+                        actual_chunk_size = min(end_byte - actual_start, int(self.max_size * 0.9))
+                        chunk_data = await audio_file.read(actual_chunk_size)
+                    else:
+                        # Граница не найдена, используем исходную позицию
+                        await audio_file.seek(start_byte)
+                        chunk_data = await audio_file.read(end_byte - start_byte)
+                else:
+                    # Первая часть - читаем с начала
+                    await audio_file.seek(0)
+                    chunk_data = await audio_file.read(end_byte)
+                
+                if not chunk_data or len(chunk_data) == 0:
+                    return False
+                
+                # Проверяем, что данные начинаются с OGG заголовка (для первой части)
+                # или содержат валидные данные
+                if start_byte == 0 and not chunk_data.startswith(b'OggS'):
+                    logger.warning("Первая часть файла не начинается с OGG заголовка")
+                    # Все равно пытаемся использовать данные
+                
+                # Сохраняем часть файла
+                async with aiofiles.open(output_path, "wb") as output_file:
+                    await output_file.write(chunk_data)
+                
+                # Проверяем, что файл создан и имеет разумный размер
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    return True
+                return False
+        except Exception as e:
+            logger.error(f"Ошибка при разделении аудио по байтам: {e}")
+            return False
+    
     async def _split_audio_file(self, audio_path: str, start_time: float, duration: float, output_path: str) -> bool:
         """
-        Разделяет аудиофайл на часть используя ffmpeg.
-        
-        ffmpeg - это консольная утилита (командная программа), не Python библиотека.
-        Устанавливается отдельно в операционную систему.
-        Вызывается через subprocess для работы с аудио файлами.
-        
-        Альтернативы:
-        - pydub (Python библиотека) - но она тоже требует ffmpeg под капотом
-        - Другие библиотеки - но для OGG Opus (формат Telegram) ffmpeg - стандарт
+        Разделяет аудиофайл на часть. Сначала пытается использовать ffmpeg,
+        если недоступен - использует альтернативный метод разделения по байтам.
         
         Args:
             audio_path: Путь к исходному файлу
@@ -125,39 +210,55 @@ class TranscriptionService:
         Returns:
             True если успешно, False иначе
         """
+        # Сначала пробуем использовать ffmpeg, если доступен
+        ffmpeg_available = await self._check_ffmpeg_available()
+        
+        if ffmpeg_available:
+            try:
+                cmd = [
+                    'ffmpeg',
+                    '-i', audio_path,
+                    '-ss', str(start_time),
+                    '-t', str(duration),
+                    '-acodec', 'copy',  # Копируем кодек без перекодирования
+                    '-y',  # Перезаписываем выходной файл
+                    output_path
+                ]
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                
+                if process.returncode == 0:
+                    # Проверяем, что файл создан и имеет разумный размер
+                    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                        return True
+                
+                logger.warning("ffmpeg не смог разделить файл, используем альтернативный метод")
+            except Exception as e:
+                logger.warning(f"Ошибка при использовании ffmpeg: {e}, используем альтернативный метод")
+        
+        # Альтернативный метод: разделение по байтам
         try:
-            # ffmpeg - консольная утилита, вызывается через subprocess
-            # Устанавливается отдельно: apt-get install ffmpeg / brew install ffmpeg
-            cmd = [
-                'ffmpeg',
-                '-i', audio_path,
-                '-ss', str(start_time),
-                '-t', str(duration),
-                '-acodec', 'copy',  # Копируем кодек без перекодирования
-                '-y',  # Перезаписываем выходной файл
-                output_path
-            ]
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await process.communicate()
+            file_size = os.path.getsize(audio_path)
             
-            if process.returncode != 0:
-                error_msg = stderr.decode('utf-8', errors='ignore')
-                logger.error(f"Ошибка разделения аудио: {error_msg}")
-                return False
+            # Оцениваем размер одной секунды аудио
+            # Используем примерную оценку: 12 КБ/секунда для OGG Opus
+            estimated_bytes_per_second = file_size / max(1, await self._get_audio_duration(audio_path))
             
-            # Проверяем, что файл создан и имеет разумный размер
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                return True
-            return False
-        except FileNotFoundError:
-            logger.error("ffmpeg не найден. Установите ffmpeg для разделения больших файлов.")
-            return False
+            # Вычисляем позиции в байтах
+            start_byte = int(start_time * estimated_bytes_per_second)
+            chunk_size = int(duration * estimated_bytes_per_second)
+            
+            # Ограничиваем размер части
+            chunk_size = min(chunk_size, int(self.max_size * 0.9))
+            start_byte = min(start_byte, file_size - 1)
+            
+            return await self._split_audio_file_by_bytes(audio_path, start_byte, chunk_size, output_path)
         except Exception as e:
-            logger.error(f"Ошибка при разделении аудио: {e}")
+            logger.error(f"Ошибка при альтернативном разделении аудио: {e}")
             return False
     
     async def _transcribe_chunk(self, audio_data: bytes, session: aiohttp.ClientSession) -> str:
@@ -245,25 +346,23 @@ class TranscriptionService:
             size_mb = file_size / (1024 * 1024)
             logger.info(f"Файл слишком большой ({size_mb:.2f} МБ), разделяем на части...")
             
-            # Проверяем наличие ffmpeg
-            if not await self._check_ffmpeg_available():
-                logger.error(f"ffmpeg не найден. Невозможно разделить большой файл ({size_mb:.2f} МБ).")
-                raise Exception(
-                    f"Аудиофайл слишком большой ({size_mb:.2f} МБ). "
-                    "Для обработки больших файлов требуется установить ffmpeg. "
-                    "Или запишите более короткое голосовое сообщение (до 1 МБ)."
-                )
-            
-            # Получаем длительность файла
+            # Получаем длительность файла (или оценку)
             total_duration = await self._get_audio_duration(audio_path)
             if total_duration <= 0:
-                raise Exception("Не удалось определить длительность аудиофайла")
+                # Если не удалось определить длительность, используем оценку по размеру
+                total_duration = file_size / (12 * 1024)  # Примерно 12 КБ/секунда
+                logger.info(f"Используем оценку длительности: {total_duration:.1f} секунд")
             
             # Оцениваем размер одной секунды аудио
             bytes_per_second = file_size / total_duration
             
             # Вычисляем длительность части, которая будет меньше 1 МБ (с запасом 10%)
             chunk_duration = (self.max_size * 0.9) / bytes_per_second
+            
+            # Проверяем наличие ffmpeg для информационных сообщений
+            ffmpeg_available = await self._check_ffmpeg_available()
+            if not ffmpeg_available:
+                logger.info("ffmpeg недоступен, используем альтернативный метод разделения по байтам")
             
             # Создаем временную директорию для частей
             temp_dir = os.path.join(os.path.dirname(audio_path), "chunks")
@@ -287,14 +386,10 @@ class TranscriptionService:
                         # Создаем временный файл для части
                         chunk_path = os.path.join(temp_dir, f"chunk_{i}.ogg")
                         
-                        # Разделяем файл
+                        # Разделяем файл (метод автоматически выберет ffmpeg или альтернативный)
                         success = await self._split_audio_file(audio_path, start_time, current_duration, chunk_path)
                         if not success:
                             logger.warning(f"Не удалось создать часть {i+1}, пропускаем")
-                            # Если ffmpeg стал недоступен во время работы, обновляем кэш
-                            if not await self._check_ffmpeg_available():
-                                logger.error("ffmpeg стал недоступен во время обработки")
-                                break
                             continue
                         
                         # Проверяем размер части
