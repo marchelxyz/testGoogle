@@ -30,7 +30,19 @@ class Config:
     TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow")
     
     # База данных
-    DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./calendar_bot.db")
+    @staticmethod
+    def _normalize_database_url(url: str) -> str:
+        """Нормализация URL базы данных для использования правильного драйвера"""
+        # Если это PostgreSQL URL без указания драйвера, используем asyncpg
+        if url.startswith("postgresql://"):
+            url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        # Если это PostgreSQL с psycopg2, заменяем на asyncpg
+        elif url.startswith("postgresql+psycopg2://"):
+            url = url.replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
+        return url
+    
+    _raw_db_url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./calendar_bot.db")
+    DATABASE_URL = _normalize_database_url(_raw_db_url)
     
     @classmethod
     def validate(cls):
