@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from config import Config
 import logging
+import pytz
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,12 @@ async def create_calendar_event(
     description: Optional[str] = None
 ) -> int:
     """Создание события календаря"""
+    # Конвертируем datetime в UTC для сохранения в БД
+    if start_datetime.tzinfo is not None:
+        start_datetime = start_datetime.astimezone(pytz.UTC)
+    if end_datetime.tzinfo is not None:
+        end_datetime = end_datetime.astimezone(pytz.UTC)
+    
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
@@ -138,6 +145,10 @@ async def get_calendar_event_by_event_id(event_id: str) -> Optional[Dict[str, An
 # Функции для работы с Notification
 async def create_notification(event_id: int, notification_time: datetime) -> int:
     """Создание уведомления"""
+    # Конвертируем datetime в UTC для сохранения в БД
+    if notification_time.tzinfo is not None:
+        notification_time = notification_time.astimezone(pytz.UTC)
+    
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
@@ -153,6 +164,15 @@ async def get_pending_notifications(
     now: datetime
 ) -> List[Dict[str, Any]]:
     """Получение уведомлений, которые нужно отправить"""
+    # Убеждаемся, что все datetime в UTC
+    if check_time.tzinfo is not None:
+        check_time = check_time.astimezone(pytz.UTC)
+    if now.tzinfo is not None:
+        now = now.astimezone(pytz.UTC)
+    
+    # Вычисляем нижнюю границу времени для проверки
+    lower_bound = now - timedelta(minutes=1)
+    
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
@@ -162,7 +182,7 @@ async def get_pending_notifications(
             WHERE n.sent = FALSE
             AND n.notification_time <= $1
             AND n.notification_time >= $2
-        """, check_time, now - timedelta(minutes=1))
+        """, check_time, lower_bound)
         return [dict(row) for row in rows]
 
 
