@@ -21,6 +21,7 @@ from database import (
 )
 from datetime import datetime, timedelta
 import re
+import pytz
 
 # Настройка логирования
 logging.basicConfig(
@@ -167,8 +168,8 @@ async def cmd_list(message: Message):
             return
         
         # Получаем события на ближайшие 7 дней
-        from datetime import timedelta
-        start_date = datetime.now()
+        timezone = pytz.timezone(Config.TIMEZONE)
+        start_date = datetime.now(timezone)
         end_date = start_date + timedelta(days=7)
         
         events = cal_service.get_events(start_date, end_date)

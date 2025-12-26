@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 from config import Config
 import logging
+import pytz
 
 logger = logging.getLogger(__name__)
 
@@ -87,13 +88,27 @@ class YandexCalendarService:
                     raise ValueError("Учетные данные не настроены. Используйте команду /setup для настройки.")
                 self._connect()
             
+            # Обрабатываем часовой пояс для start_datetime
+            timezone = pytz.timezone(Config.TIMEZONE)
+            if start_datetime.tzinfo is None:
+                # Если datetime без часового пояса, считаем что это локальное время
+                start_datetime = timezone.localize(start_datetime)
+            elif start_datetime.tzinfo != timezone:
+                # Если часовой пояс другой, конвертируем в локальный
+                start_datetime = start_datetime.astimezone(timezone)
+            
             # Вычисляем конец события
             end_datetime = start_datetime + timedelta(minutes=duration_minutes)
             
-            # Создаем событие
+            # CalDAV обычно работает с naive datetime (без часового пояса) или UTC
+            # Конвертируем в UTC для CalDAV, но сохраняем оригинальные значения для возврата
+            start_datetime_utc = start_datetime.astimezone(pytz.UTC)
+            end_datetime_utc = end_datetime.astimezone(pytz.UTC)
+            
+            # Создаем событие (CalDAV может работать с UTC datetime)
             event = self.calendar.save_event(
-                dtstart=start_datetime,
-                dtend=end_datetime,
+                dtstart=start_datetime_utc,
+                dtend=end_datetime_utc,
                 summary=summary,
                 description=description or "Создано через Telegram Бота"
             )
@@ -132,6 +147,24 @@ class YandexCalendarService:
                 if not self.yandex_user or not self.yandex_password:
                     raise ValueError("Учетные данные не настроены. Используйте команду /setup для настройки.")
                 self._connect()
+            
+            # Обрабатываем часовые пояса для дат поиска
+            timezone = pytz.timezone(Config.TIMEZONE)
+            if start_date:
+                if start_date.tzinfo is None:
+                    start_date = timezone.localize(start_date)
+                elif start_date.tzinfo != timezone:
+                    start_date = start_date.astimezone(timezone)
+                # Конвертируем в UTC для CalDAV
+                start_date = start_date.astimezone(pytz.UTC)
+            
+            if end_date:
+                if end_date.tzinfo is None:
+                    end_date = timezone.localize(end_date)
+                elif end_date.tzinfo != timezone:
+                    end_date = end_date.astimezone(timezone)
+                # Конвертируем в UTC для CalDAV
+                end_date = end_date.astimezone(pytz.UTC)
             
             if start_date and end_date:
                 events = self.calendar.search(
