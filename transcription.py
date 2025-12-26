@@ -1,6 +1,7 @@
 """Сервис транскрибации голосовых сообщений"""
 import aiofiles
 import aiohttp
+import os
 from config import Config
 import logging
 
@@ -23,8 +24,24 @@ class TranscriptionService:
             
         Returns:
             Транскрибированный текст
+            
+        Raises:
+            Exception: Если файл слишком большой или произошла другая ошибка
         """
         try:
+            # Проверяем размер файла (Yandex SpeechKit требует файлы меньше 1 МБ)
+            file_size = os.path.getsize(audio_path)
+            max_size = 1024 * 1024  # 1 МБ в байтах
+            
+            if file_size > max_size:
+                size_mb = file_size / (1024 * 1024)
+                logger.error(f"Аудиофайл слишком большой: {size_mb:.2f} МБ (максимум 1 МБ)")
+                raise Exception(
+                    f"Аудиофайл слишком большой ({size_mb:.2f} МБ). "
+                    "Yandex SpeechKit поддерживает файлы до 1 МБ. "
+                    "Пожалуйста, запишите более короткое голосовое сообщение."
+                )
+            
             # Читаем аудиофайл
             async with aiofiles.open(audio_path, "rb") as audio_file:
                 audio_data = await audio_file.read()
@@ -51,9 +68,28 @@ class TranscriptionService:
                     data=audio_data
                 ) as response:
                     if response.status != 200:
-                        error_text = await response.text()
+                        # Читаем тело ответа один раз
+                        error_data = await response.read()
+                        error_text = error_data.decode('utf-8', errors='ignore')
                         logger.error(f"Ошибка API Yandex SpeechKit: {response.status} - {error_text}")
-                        raise Exception(f"Ошибка распознавания речи: {response.status}")
+                        
+                        # Пытаемся распарсить как JSON
+                        error_msg = None
+                        try:
+                            import json
+                            error_json = json.loads(error_text)
+                            error_msg = error_json.get("error", {}).get("error_message", error_text)
+                        except:
+                            error_msg = error_text
+                        
+                        # Проверяем на ошибку размера файла
+                        if error_msg and "audio should be less than 1 mb" in error_msg.lower():
+                            raise Exception(
+                                "Аудиофайл слишком большой (более 1 МБ). "
+                                "Пожалуйста, запишите более короткое голосовое сообщение."
+                            )
+                        
+                        raise Exception(f"Ошибка распознавания речи: {error_msg or response.status}")
                     
                     result = await response.json()
                     

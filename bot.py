@@ -315,6 +315,14 @@ async def handle_voice(message: Message):
             
     except Exception as e:
         logger.error(f"Ошибка обработки голосового сообщения: {e}")
+        
+        # Удаляем временный файл в случае ошибки
+        try:
+            file_path = os.path.join(TEMP_DIR, f"{message.voice.file_id}.ogg")
+            await aiofiles_os.remove(file_path)
+        except:
+            pass
+        
         await message.answer(
             f"❌ Произошла ошибка: {str(e)}\n\n"
             "Попробуйте записать сообщение еще раз или используйте /help для справки."
