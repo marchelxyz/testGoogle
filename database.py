@@ -125,8 +125,8 @@ async def create_calendar_event(
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             INSERT INTO calendar_events 
-            (event_id, summary, description, start_datetime, end_datetime, telegram_user_id)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            (event_id, summary, description, start_datetime, end_datetime, telegram_user_id, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
             RETURNING id
         """, event_id, summary, description, start_datetime, end_datetime, telegram_user_id)
         return row['id']
