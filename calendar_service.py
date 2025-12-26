@@ -10,21 +10,33 @@ logger = logging.getLogger(__name__)
 class YandexCalendarService:
     """Сервис для работы с Яндекс Календарем"""
     
-    def __init__(self):
+    def __init__(self, yandex_user: Optional[str] = None, yandex_password: Optional[str] = None):
+        """
+        Инициализация сервиса календаря
+        
+        Args:
+            yandex_user: Email пользователя Яндекс (если None, используется из Config)
+            yandex_password: Пароль приложения Яндекс (если None, используется из Config)
+        """
+        self.yandex_user = yandex_user or Config.YANDEX_USER
+        self.yandex_password = yandex_password or Config.YANDEX_PASS
         self.client: Optional[caldav.DAVClient] = None
         self.calendar: Optional[caldav.Calendar] = None
-        self._connect()
+        if self.yandex_user and self.yandex_password:
+            self._connect()
     
     def _connect(self):
         """Подключение к Яндекс Календарю"""
         try:
-            if not Config.YANDEX_USER or not Config.YANDEX_PASS:
+            if not self.yandex_user or not self.yandex_password:
                 raise ValueError("Не указаны учетные данные Яндекс Календаря")
             
+            caldav_url = f"https://caldav.yandex.ru/calendars/{self.yandex_user}/"
+            
             self.client = caldav.DAVClient(
-                url=Config.CALDAV_URL,
-                username=Config.YANDEX_USER,
-                password=Config.YANDEX_PASS
+                url=caldav_url,
+                username=self.yandex_user,
+                password=self.yandex_password
             )
             
             # Получаем главный календарь
@@ -41,6 +53,14 @@ class YandexCalendarService:
         except Exception as e:
             logger.error(f"Ошибка подключения к Яндекс Календарю: {e}")
             raise ValueError(f"Не удалось подключиться к Яндекс Календарю: {e}")
+    
+    def reconnect(self, yandex_user: str, yandex_password: str):
+        """Переподключение с новыми учетными данными"""
+        self.yandex_user = yandex_user
+        self.yandex_password = yandex_password
+        self.client = None
+        self.calendar = None
+        self._connect()
     
     def create_event(
         self,
@@ -63,6 +83,8 @@ class YandexCalendarService:
         """
         try:
             if not self.calendar:
+                if not self.yandex_user or not self.yandex_password:
+                    raise ValueError("Учетные данные не настроены. Используйте команду /setup для настройки.")
                 self._connect()
             
             # Вычисляем конец события
@@ -107,6 +129,8 @@ class YandexCalendarService:
         """
         try:
             if not self.calendar:
+                if not self.yandex_user or not self.yandex_password:
+                    raise ValueError("Учетные данные не настроены. Используйте команду /setup для настройки.")
                 self._connect()
             
             if start_date and end_date:

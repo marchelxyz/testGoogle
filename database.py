@@ -33,6 +33,17 @@ class Notification(Base):
     sent: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+class UserCredentials(Base):
+    """Модель учетных данных пользователя для Яндекс Календаря"""
+    __tablename__ = "user_credentials"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    telegram_user_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+    yandex_user: Mapped[str] = mapped_column(String, nullable=False)  # Email пользователя
+    yandex_password: Mapped[str] = mapped_column(String, nullable=False)  # Пароль приложения
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 # Создание движка и сессии
 engine = create_async_engine(Config.DATABASE_URL, echo=False)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
