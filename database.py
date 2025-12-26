@@ -106,10 +106,20 @@ async def create_calendar_event(
 ) -> int:
     """Создание события календаря"""
     # Конвертируем datetime в UTC для сохранения в БД
+    # asyncpg требует naive datetime для TIMESTAMP полей PostgreSQL
+    timezone = pytz.timezone(Config.TIMEZONE)
+    
     if start_datetime.tzinfo is not None:
-        start_datetime = start_datetime.astimezone(pytz.UTC)
+        start_datetime = start_datetime.astimezone(pytz.UTC).replace(tzinfo=None)
+    else:
+        # Если datetime naive, считаем что это уже в локальном timezone и конвертируем в UTC
+        start_datetime = timezone.localize(start_datetime).astimezone(pytz.UTC).replace(tzinfo=None)
+    
     if end_datetime.tzinfo is not None:
-        end_datetime = end_datetime.astimezone(pytz.UTC)
+        end_datetime = end_datetime.astimezone(pytz.UTC).replace(tzinfo=None)
+    else:
+        # Если datetime naive, считаем что это уже в локальном timezone и конвертируем в UTC
+        end_datetime = timezone.localize(end_datetime).astimezone(pytz.UTC).replace(tzinfo=None)
     
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -146,8 +156,14 @@ async def get_calendar_event_by_event_id(event_id: str) -> Optional[Dict[str, An
 async def create_notification(event_id: int, notification_time: datetime) -> int:
     """Создание уведомления"""
     # Конвертируем datetime в UTC для сохранения в БД
+    # asyncpg требует naive datetime для TIMESTAMP полей PostgreSQL
+    timezone = pytz.timezone(Config.TIMEZONE)
+    
     if notification_time.tzinfo is not None:
-        notification_time = notification_time.astimezone(pytz.UTC)
+        notification_time = notification_time.astimezone(pytz.UTC).replace(tzinfo=None)
+    else:
+        # Если datetime naive, считаем что это уже в локальном timezone и конвертируем в UTC
+        notification_time = timezone.localize(notification_time).astimezone(pytz.UTC).replace(tzinfo=None)
     
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -164,11 +180,15 @@ async def get_pending_notifications(
     now: datetime
 ) -> List[Dict[str, Any]]:
     """Получение уведомлений, которые нужно отправить"""
-    # Убеждаемся, что все datetime в UTC
+    # Убеждаемся, что все datetime в UTC и naive для передачи в БД
+    # asyncpg требует naive datetime для TIMESTAMP полей PostgreSQL
     if check_time.tzinfo is not None:
-        check_time = check_time.astimezone(pytz.UTC)
+        check_time = check_time.astimezone(pytz.UTC).replace(tzinfo=None)
+    # Если naive, считаем что это уже UTC, ничего не делаем
+    
     if now.tzinfo is not None:
-        now = now.astimezone(pytz.UTC)
+        now = now.astimezone(pytz.UTC).replace(tzinfo=None)
+    # Если naive, считаем что это уже UTC, ничего не делаем
     
     # Вычисляем нижнюю границу времени для проверки
     lower_bound = now - timedelta(minutes=1)
