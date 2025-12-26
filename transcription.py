@@ -18,6 +18,38 @@ class TranscriptionService:
         self.folder_id = Config.YANDEX_SPEECHKIT_FOLDER_ID
         self.api_url = "https://stt.api.cloud.yandex.net/speech/v1/stt:recognize"
         self.max_size = 1024 * 1024  # 1 МБ в байтах
+        self._ffmpeg_available = None  # Кэш для проверки наличия ffmpeg
+    
+    async def _check_ffmpeg_available(self) -> bool:
+        """
+        Проверяет доступность ffmpeg в системе.
+        Результат кэшируется для избежания повторных проверок.
+        
+        Returns:
+            True если ffmpeg доступен, False иначе
+        """
+        if self._ffmpeg_available is not None:
+            return self._ffmpeg_available
+        
+        try:
+            process = await asyncio.create_subprocess_exec(
+                'ffmpeg', '-version',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await process.communicate()
+            self._ffmpeg_available = (process.returncode == 0)
+            if not self._ffmpeg_available:
+                logger.warning("ffmpeg найден, но не работает корректно")
+            return self._ffmpeg_available
+        except FileNotFoundError:
+            logger.warning("ffmpeg не найден в системе")
+            self._ffmpeg_available = False
+            return False
+        except Exception as e:
+            logger.warning(f"Ошибка при проверке ffmpeg: {e}")
+            self._ffmpeg_available = False
+            return False
     
     async def _get_audio_duration(self, audio_path: str) -> float:
         """
@@ -210,22 +242,12 @@ class TranscriptionService:
                     return text
             
             # Файл больше 1 МБ - разделяем на части
-            logger.info(f"Файл слишком большой ({file_size / (1024*1024):.2f} МБ), разделяем на части...")
+            size_mb = file_size / (1024 * 1024)
+            logger.info(f"Файл слишком большой ({size_mb:.2f} МБ), разделяем на части...")
             
             # Проверяем наличие ffmpeg
-            try:
-                # Проверяем доступность ffmpeg
-                process = await asyncio.create_subprocess_exec(
-                    'ffmpeg', '-version',
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                await process.communicate()
-                if process.returncode != 0:
-                    raise FileNotFoundError("ffmpeg не работает корректно")
-            except FileNotFoundError:
-                size_mb = file_size / (1024 * 1024)
-                logger.error("ffmpeg не найден. Невозможно разделить большой файл.")
+            if not await self._check_ffmpeg_available():
+                logger.error(f"ffmpeg не найден. Невозможно разделить большой файл ({size_mb:.2f} МБ).")
                 raise Exception(
                     f"Аудиофайл слишком большой ({size_mb:.2f} МБ). "
                     "Для обработки больших файлов требуется установить ffmpeg. "
@@ -269,6 +291,10 @@ class TranscriptionService:
                         success = await self._split_audio_file(audio_path, start_time, current_duration, chunk_path)
                         if not success:
                             logger.warning(f"Не удалось создать часть {i+1}, пропускаем")
+                            # Если ffmpeg стал недоступен во время работы, обновляем кэш
+                            if not await self._check_ffmpeg_available():
+                                logger.error("ffmpeg стал недоступен во время обработки")
+                                break
                             continue
                         
                         # Проверяем размер части

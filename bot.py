@@ -231,7 +231,23 @@ async def handle_voice(message: Message):
         else:
             await message.answer("🔤 Распознаю речь...")
         
-        text = await transcription_service.transcribe_voice(file_path)
+        try:
+            text = await transcription_service.transcribe_voice(file_path)
+        except Exception as transcribe_error:
+            error_msg = str(transcribe_error)
+            # Проверяем, связана ли ошибка с отсутствием ffmpeg
+            if "ffmpeg" in error_msg.lower() or "слишком большой" in error_msg.lower():
+                await message.answer(
+                    f"❌ {error_msg}\n\n"
+                    "💡 Совет: Запишите более короткое голосовое сообщение (до 1 МБ) "
+                    "или установите ffmpeg для обработки больших файлов."
+                )
+            else:
+                await message.answer(
+                    f"❌ Ошибка распознавания речи: {error_msg}\n\n"
+                    "Попробуйте записать сообщение еще раз."
+                )
+            return
         
         if not text or len(text.strip()) == 0:
             await message.answer("❌ Не удалось распознать речь. Попробуйте записать сообщение еще раз.")
