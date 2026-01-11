@@ -79,11 +79,9 @@ cp .env.example .env
 # Telegram Bot Token (получить у @BotFather)
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 
-# Yandex SpeechKit (для транскрибации голоса)
-# API ключ: https://cloud.yandex.ru/iam/keys
-# Folder ID: https://cloud.yandex.ru/docs/resource-manager/operations/folder/get-id
-YANDEX_SPEECHKIT_API_KEY=your_yandex_speechkit_api_key_here
-YANDEX_SPEECHKIT_FOLDER_ID=your_yandex_folder_id_here
+# OpenAI API Key (для транскрибации голоса через Whisper)
+# Получить можно здесь: https://platform.openai.com/api-keys
+OPENAI_API_KEY=your_openai_api_key_here
 
 # Google Gemini API Key (для обработки текста)
 # Получить можно здесь: https://makersuite.google.com/app/apikey
@@ -234,10 +232,9 @@ Railway автоматически использует `railway.json` для к
 
 ### Ошибки транскрибации
 
-- Проверьте наличие `YANDEX_SPEECHKIT_API_KEY` и `YANDEX_SPEECHKIT_FOLDER_ID`
-- Убедитесь, что API ключ действителен (получить можно [здесь](https://cloud.yandex.ru/iam/keys))
-- Проверьте, что на счету Yandex Cloud есть средства
-- Убедитесь, что Folder ID указан правильно
+- Проверьте наличие `OPENAI_API_KEY`
+- Убедитесь, что API ключ действителен (получить можно [здесь](https://platform.openai.com/api-keys))
+- Проверьте, что на счету OpenAI есть средства
 - Если получаете ошибку о большом размере файла, убедитесь, что установлен **ffmpeg** (см. раздел "Требования")
 - Бот автоматически разделяет файлы больше 1 МБ на части, если установлен ffmpeg
 
@@ -283,8 +280,7 @@ Railway автоматически использует `railway.json` для к
    cp .env.example .env
    # Отредактируйте .env и заполните все значения:
    # - TELEGRAM_BOT_TOKEN
-   # - YANDEX_SPEECHKIT_API_KEY
-   # - YANDEX_SPEECHKIT_FOLDER_ID
+   # - OPENAI_API_KEY
    # - GEMINI_API_KEY
    # - YANDEX_USER (опционально, можно настроить через /setup)
    # - YANDEX_PASS (опционально, можно настроить через /setup)
