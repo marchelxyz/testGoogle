@@ -520,7 +520,7 @@ async def main():
     # Проверяем конфигурацию (учетные данные Яндекс теперь не обязательны)
     try:
         # Проверяем только обязательные для работы бота переменные
-        required = ["TELEGRAM_BOT_TOKEN", "YANDEX_SPEECHKIT_API_KEY", "YANDEX_SPEECHKIT_FOLDER_ID", "GEMINI_API_KEY"]
+        required = ["TELEGRAM_BOT_TOKEN", "OPENAI_API_KEY", "GEMINI_API_KEY"]
         missing = [var for var in required if not getattr(Config, var)]
         if missing:
             raise ValueError(f"Отсутствуют обязательные переменные окружения: {', '.join(missing)}")
