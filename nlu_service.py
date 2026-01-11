@@ -1,5 +1,5 @@
 """Сервис обработки естественного языка для извлечения данных о событиях"""
-import google.generativeai as genai
+import google.genai as genai
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 from config import Config

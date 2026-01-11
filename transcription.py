@@ -87,6 +87,11 @@ class TranscriptionService:
                                 raise Exception("Неподдерживаемый формат аудиофайла. Поддерживаемые форматы: mp3, mp4, mpeg, mpga, m4a, wav, webm")
                             elif "file_too_large" in error_text:
                                 raise Exception("Файл слишком большой. Максимум: 25 МБ")
+                        elif response.status == 429:
+                            if "insufficient_quota" in error_text:
+                                raise Exception("Превышена квота OpenAI API. Пополните счет или проверьте тарифный план.")
+                            elif "rate_limit_exceeded" in error_text:
+                                raise Exception("Превышен лимит запросов. Попробуйте позже.")
                         
                         # При ошибках сервера делаем повторную попытку
                         if response.status >= 500 and attempt < max_retries - 1:
