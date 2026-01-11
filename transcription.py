@@ -18,7 +18,30 @@ class TranscriptionService:
         self.max_size = 25 * 1024 * 1024  # 25 МБ в байтах (лимит OpenAI)
     
         
-    async def _transcribe_audio(self, audio_data: bytes, session: aiohttp.ClientSession, max_retries: int = 3) -> str:
+    def _get_audio_format(self, filename: str) -> str:
+        """
+        Определяет формат аудиофайла по расширению
+        
+        Args:
+            filename: Имя файла
+            
+        Returns:
+            MIME тип файла
+        """
+        ext = os.path.splitext(filename)[1].lower()
+        format_map = {
+            '.mp3': 'audio/mpeg',
+            '.mp4': 'audio/mp4', 
+            '.mpeg': 'audio/mpeg',
+            '.mpga': 'audio/mpeg',
+            '.m4a': 'audio/mp4',
+            '.wav': 'audio/wav',
+            '.webm': 'audio/webm',
+            '.ogg': 'audio/ogg'
+        }
+        return format_map.get(ext, 'audio/ogg')  # по умолчанию OGG для Telegram
+    
+    async def _transcribe_audio(self, audio_data: bytes, session: aiohttp.ClientSession, filename: str = "audio.ogg", max_retries: int = 3) -> str:
         """
         Транскрибирует аудио через OpenAI Whisper API с повторными попытками при ошибках
         
@@ -35,14 +58,16 @@ class TranscriptionService:
         }
         
         # OpenAI Whisper API поддерживает форматы: mp3, mp4, mpeg, mpga, m4a, wav, webm
-        # Для Telegram голосовых сообщений (OGG) нужно конвертировать, но попробуем сначала отправить как есть
+        # Определяем MIME тип автоматически
+        content_type = self._get_audio_format(filename)
         
         data = aiohttp.FormData()
         data.add_field('file', audio_data, 
-                      filename='audio.ogg', 
-                      content_type='audio/ogg')
+                      filename=filename, 
+                      content_type=content_type)
         data.add_field('model', 'whisper-1')
         data.add_field('language', 'ru')  # Указываем русский язык для лучшей точности
+        data.add_field('response_format', 'json')
         
         last_error = None
         
@@ -55,6 +80,13 @@ class TranscriptionService:
                 ) as response:
                     if response.status != 200:
                         error_text = await response.text()
+                        
+                        # Обработка специфичных ошибок OpenAI
+                        if response.status == 400:
+                            if "invalid_file_format" in error_text:
+                                raise Exception("Неподдерживаемый формат аудиофайла. Поддерживаемые форматы: mp3, mp4, mpeg, mpga, m4a, wav, webm")
+                            elif "file_too_large" in error_text:
+                                raise Exception("Файл слишком большой. Максимум: 25 МБ")
                         
                         # При ошибках сервера делаем повторную попытку
                         if response.status >= 500 and attempt < max_retries - 1:
@@ -94,6 +126,35 @@ class TranscriptionService:
             raise last_error
         raise Exception("Не удалось транскрибировать аудио после всех попыток")
     
+    def _validate_audio_file(self, audio_path: str) -> None:
+        """
+        Валидирует аудиофайл перед отправкой в OpenAI API
+        
+        Args:
+            audio_path: Путь к аудиофайлу
+            
+        Raises:
+            Exception: Если файл не валидный
+        """
+        if not os.path.exists(audio_path):
+            raise Exception(f"Файл не существует: {audio_path}")
+        
+        file_size = os.path.getsize(audio_path)
+        if file_size == 0:
+            raise Exception("Файл пустой")
+        
+        if file_size > self.max_size:
+            size_mb = file_size / (1024 * 1024)
+            raise Exception(f"Файл слишком большой ({size_mb:.2f} МБ). Максимум: 25 МБ")
+        
+        # Проверяем расширение файла
+        filename = os.path.basename(audio_path)
+        ext = os.path.splitext(filename)[1].lower()
+        supported_formats = {'.mp3', '.mp4', '.mpeg', '.mpga', '.m4a', '.wav', '.webm', '.ogg'}
+        
+        if ext not in supported_formats:
+            logger.warning(f"Неподдерживаемый формат файла: {ext}. Попытка отправки все равно будет выполнена.")
+    
     async def transcribe_voice(self, audio_path: str) -> str:
         """
         Транскрибация голосового сообщения через OpenAI Whisper API.
@@ -109,12 +170,10 @@ class TranscriptionService:
             Exception: Если произошла ошибка при транскрибации
         """
         try:
-            file_size = os.path.getsize(audio_path)
+            # Валидация файла
+            self._validate_audio_file(audio_path)
             
-            # Проверяем размер файла (лимит OpenAI - 25 МБ)
-            if file_size > self.max_size:
-                size_mb = file_size / (1024 * 1024)
-                raise Exception(f"Файл слишком большой ({size_mb:.2f} МБ). Максимум: 25 МБ")
+            file_size = os.path.getsize(audio_path)
             
             logger.info(f"Начинаем транскрибацию файла: {audio_path} ({file_size / 1024:.1f} КБ)")
             
@@ -124,7 +183,8 @@ class TranscriptionService:
             
             # Отправляем в OpenAI Whisper API
             async with aiohttp.ClientSession() as session:
-                text = await self._transcribe_audio(audio_data, session)
+                filename = os.path.basename(audio_path)
+                text = await self._transcribe_audio(audio_data, session, filename)
                 if not text:
                     raise Exception("Не удалось распознать речь. Попробуйте записать сообщение еще раз.")
                 
